@@ -1,0 +1,93 @@
+name: Build Optimal APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Extract source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf extracted
+          mkdir extracted
+          unzip -q OPTIMAL-110.zip -d extracted
+          GRADLEW=$(find extracted -type f -name gradlew | head -n 1)
+          if [ -z "$GRADLEW" ]; then
+            echo "gradlew not found after extraction"
+            exit 1
+          fi
+          ROOT=$(dirname "$GRADLEW")
+          echo "PROJECT_ROOT=$ROOT" >> "$GITHUB_ENV"
+          chmod +x "$GRADLEW"
+
+      - name: Validate Firebase config
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          if [ ! -f app/google-services.json ]; then
+            echo "Missing app/google-services.json"
+            exit 2
+          fi
+          python3 - <<'PY'
+          import json
+          p='app/google-services.json'
+          d=json.load(open(p, encoding='utf-8'))
+          packages=[]
+          for c in d.get('client',[]):
+              info=c.get('client_info',{}).get('android_client_info',{})
+              if info.get('package_name'):
+                  packages.append(info['package_name'])
+          print('Firebase packages:', ', '.join(packages))
+          if 'com.optimal.fleet' not in packages:
+              raise SystemExit('google-services.json has no com.optimal.fleet client')
+          PY
+
+      - name: Build debug APK with Supabase config
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
+            -PSUPABASE_URL='https://madkfvggyolmdberzmtb.supabase.co' \
+            -PSUPABASE_ANON_KEY='sb_publishable_X2j6KkECFjOaQE-mKZxQ_Q_fOTyw34S'
+
+      - name: Verify APK and copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          APK=$(find app/build/outputs/apk/debug -type f -name '*.apk' | head -n 1)
+          if [ -z "$APK" ]; then
+            echo "APK not found"
+            exit 3
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$APK" "$GITHUB_WORKSPACE/out/Optimal-v110-debug.apk"
+          sha256sum "$GITHUB_WORKSPACE/out/Optimal-v110-debug.apk" | tee "$GITHUB_WORKSPACE/out/Optimal-v110-debug.apk.sha256"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Optimal-v110-debug-apk
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
